@@ -4,6 +4,13 @@ A small macOS menu bar app that shows your **DeepSeek API balance** at a glance.
 
 <p align="center">
   <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/menubar-dark.png">
+    <img src="docs/menubar-light.png" alt="Menu bar item: DeepSeek whale logo, a small gauge and 71%" width="150">
+  </picture>
+</p>
+
+<p align="center">
+  <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/screenshot-dark.png">
     <img src="docs/screenshot-light.png" alt="DeepSeekBar panel showing 71% balance left, about 69 days remaining and a 7-day spending chart" width="320">
   </picture>
@@ -44,7 +51,7 @@ To start it automatically, open the panel and turn on **Open at login**.
 
 DeepSeek's API only exposes your **balance** (`GET /user/balance`), not per-request usage. So the app:
 
-1. Checks your balance every 15 minutes and whenever you open the panel.
+1. Checks your balance every 15 minutes (change with `DS_REFRESH_MINUTES`) and whenever you open the panel.
 2. Saves a snapshot to `history.json` whenever the balance changes.
 3. Works out **spending** from the drops between snapshots (top-ups are ignored), and **how long it lasts** from your average daily spend over the last 7 days.
 
@@ -52,7 +59,7 @@ Everything shown is measured from your own balance — there are no price-based 
 
 **What 100% means:** DeepSeek has no quota, only a prepaid balance. By default 100% is your balance right after your latest top-up, and each top-up resets it. Set `DS_BUDGET` to measure against a fixed amount instead.
 
-**Low-balance alert:** you get one notification when the balance drops below `DS_ALERT_PERCENT` (default 15%) or the API is paused. It re-arms after you top up.
+**Low-balance alert:** you get one notification when the balance drops below `DS_ALERT_PERCENT` (default 15%) or the API is paused, and the menu bar turns red. It re-arms after you top up. To see what it looks like, set `DS_ALERT_PERCENT=101`, click refresh, then remove the line — macOS asks you to allow notifications the first time.
 
 If your account has balances in both CNY and USD, the app shows the one with money in it.
 
@@ -62,7 +69,8 @@ If your account has balances in both CNY and USD, the app shows the one with mon
 |---|---|---|
 | `DEEPSEEK_API_KEY` | — | Your API key (required) |
 | `DS_BUDGET` | balance after last top-up | Fixed amount that counts as 100% |
-| `DS_ALERT_PERCENT` | `15` | Notify when the balance drops below this % |
+| `DS_ALERT_PERCENT` | `15` | Notify (and turn the menu bar red) below this % |
+| `DS_REFRESH_MINUTES` | `15` | How often to check the balance (minimum 1) |
 | `DS_CNY_PER_USD` | `7.1` | Exchange rate for the ¥ / $ switch |
 
 Click refresh in the panel after editing `.env`.
@@ -90,6 +98,8 @@ The README screenshots are rendered by the app itself from made-up numbers:
 B=~/Applications/DeepSeekBar.app/Contents/MacOS/DeepSeekBar
 $B --render-demo docs/screenshot-light.png light
 $B --render-demo docs/screenshot-dark.png dark
+$B --render-menubar docs/menubar-light.png light
+$B --render-menubar docs/menubar-dark.png dark
 ```
 
 ## Uninstall

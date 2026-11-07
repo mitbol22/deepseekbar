@@ -15,7 +15,10 @@ let projectDir = URL(fileURLWithPath: CommandLine.arguments.count > 1 && !Comman
     : (Bundle.main.object(forInfoDictionaryKey: "DSProjectDir") as? String ?? NSHomeDirectory()))
 let envURL = projectDir.appendingPathComponent(".env")
 let historyURL = projectDir.appendingPathComponent("history.json")
-let refreshInterval: TimeInterval = 15 * 60
+/// How often to check the balance: DS_REFRESH_MINUTES in .env (default 15, minimum 1).
+func refreshInterval(_ env: [String: String] = loadEnv()) -> TimeInterval {
+    max(1, env["DS_REFRESH_MINUTES"].flatMap(Double.init) ?? 15) * 60
+}
 
 func loadEnv() -> [String: String] {
     var env = ProcessInfo.processInfo.environment
@@ -541,7 +544,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ n: Notification) {
         MainActor.assumeIsolated {
             store = Store()
-            store.onChange = { [weak self] in self?.updateButton() }
+            store.onChange = { [weak self] in
+                self?.updateButton()
+                self?.scheduleTimer()  // picks up a changed DS_REFRESH_MINUTES
+            }
             popover.behavior = .transient
             let host = NSHostingController(rootView: PopoverView(store: store))
             host.sizingOptions = .preferredContentSize
@@ -553,7 +559,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item.button?.imagePosition = .imageOnly
         item.button?.action = #selector(toggle)
         item.button?.target = self
-        timer = Timer.scheduledTimer(withTimeInterval: refreshInterval, repeats: true) { [weak self] _ in
+        scheduleTimer()
+    }
+
+    func scheduleTimer() {
+        let interval = refreshInterval()
+        if let timer, timer.isValid, timer.timeInterval == interval { return }
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.store.refresh() }
         }
     }
@@ -570,7 +583,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case let .loaded(u):
             button.image = menuBarImage(pct: u.available ? u.pct : 0,
                                         text: u.available ? String(format: "%.0f%%", u.pct) : "off")
-            button.contentTintColor = (u.pct < 15 || !u.available) ? .systemRed : nil
+            button.contentTintColor = (u.pct < store.alertPercent || !u.available) ? .systemRed : nil
         }
     }
 
@@ -622,6 +635,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     rep.size = host.bounds.size
     host.cacheDisplay(in: host.bounds, to: rep)
     try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+}
+
+/// The menu bar item on a menu-bar-like strip, tinted like the real thing.
+func renderMenuBarDemo(to path: String, dark: Bool) {
+    let item = menuBarImage(pct: 71, text: "71%")
+    let pad: CGFloat = 14, h: CGFloat = 30
+    let size = NSSize(width: item.size.width + pad * 2, height: h)
+    let scale: CGFloat = 3
+    let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width * scale), pixelsHigh: Int(size.height * scale),
+                               bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                               colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+    rep.size = size
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+    let bg = dark ? NSColor(white: 0.16, alpha: 1) : NSColor(white: 0.93, alpha: 1)
+    bg.setFill()
+    NSBezierPath(roundedRect: NSRect(origin: .zero, size: size), xRadius: 8, yRadius: 8).fill()
+    // Tint the template image: draw it, then fill over its pixels only.
+    let tinted = NSImage(size: item.size, flipped: false) { r in
+        item.draw(in: r)
+        (dark ? NSColor.white : NSColor.black).set()
+        r.fill(using: .sourceAtop)
+        return true
+    }
+    tinted.draw(in: NSRect(x: pad, y: ((h - item.size.height) / 2).rounded(), width: item.size.width, height: item.size.height))
+    NSGraphicsContext.restoreGraphicsState()
+    try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+}
+
+if let i = CommandLine.arguments.firstIndex(of: "--render-menubar"), i + 1 < CommandLine.arguments.count {
+    _ = NSApplication.shared
+    renderMenuBarDemo(to: CommandLine.arguments[i + 1], dark: CommandLine.arguments.dropFirst(i + 2).first == "dark")
+    exit(0)
 }
 
 if let i = CommandLine.arguments.firstIndex(of: "--render-demo"), i + 1 < CommandLine.arguments.count {
