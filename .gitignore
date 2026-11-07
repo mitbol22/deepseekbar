@@ -1,0 +1,31 @@
+# Secrets — your DeepSeek API key
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# Personal data — balance snapshots / spending history
+history.json
+*.history.json
+
+# Build output (Info.plist embeds your local folder path, e.g. /Users/<you>/...)
+build/
+*.app
+*.dSYM/
+
+# macOS / editor junk (can contain local paths and file names)
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+.vscode/
+.idea/
+*.swp
+*~
+
+# Logs and temp files
+*.log
+tmp/
