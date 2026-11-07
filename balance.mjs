@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-// DeepSeek balance & token consumption checker.
+// DeepSeek balance & spending checker.
 //
 // - Reads your live balance from GET https://api.deepseek.com/user/balance
-// - Estimates how many tokens that balance still buys
+// - Estimates how many days your balance lasts at your recent pace
 // - Saves a snapshot each run (history.json) so you can see how much you've
 //   spent / consumed since the last check and per day.
 //
@@ -22,20 +22,6 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const HISTORY_FILE = join(HERE, 'history.json')
 const ENV_FILE = join(HERE, '.env')
 
-// Prices per 1M tokens, in USD. DeepSeek changes these from time to time —
-// check https://api-docs.deepseek.com/quick_start/pricing and override via .env.
-const PRICE = {
-  inputHit: num(process.env.DS_PRICE_INPUT_HIT, 0.028),
-  inputMiss: num(process.env.DS_PRICE_INPUT_MISS, 0.28),
-  output: num(process.env.DS_PRICE_OUTPUT, 0.42),
-}
-const CNY_PER_USD = num(process.env.DS_CNY_PER_USD, 7.1)
-
-function num(v, fallback) {
-  const n = Number(v)
-  return v !== undefined && v !== '' && Number.isFinite(n) ? n : fallback
-}
-
 function loadEnvFile() {
   if (!existsSync(ENV_FILE)) return
   for (const line of readFileSync(ENV_FILE, 'utf8').split('\n')) {
@@ -53,24 +39,7 @@ function loadHistory() {
 }
 
 const fmtMoney = (v, cur) => `${cur === 'CNY' ? '¥' : '$'}${v.toFixed(4)}`
-const fmtTokens = (n) =>
-  n >= 1e9 ? `${(n / 1e9).toFixed(2)}B` : n >= 1e6 ? `${(n / 1e6).toFixed(2)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}K` : `${Math.round(n)}`
 
-function toUsd(amount, currency) {
-  return currency === 'CNY' ? amount / CNY_PER_USD : amount
-}
-
-// Tokens a USD amount buys for a few usage shapes.
-function tokenEstimates(usd) {
-  // Typical chat: 3 input tokens (all cache miss) per 1 output token.
-  const blended = (3 * PRICE.inputMiss + PRICE.output) / 4
-  return {
-    'Input only (cache miss)': (usd / PRICE.inputMiss) * 1e6,
-    'Input only (cache hit)': (usd / PRICE.inputHit) * 1e6,
-    'Output only': (usd / PRICE.output) * 1e6,
-    'Mixed chat (3 in : 1 out)': (usd / blended) * 1e6,
-  }
-}
 
 function showHistory(history) {
   if (history.length === 0) {
@@ -102,8 +71,7 @@ function showHistory(history) {
   if (perDay.size) {
     console.log(`\nSpend per day (${cur}, top-ups excluded):`)
     for (const [day, spent] of perDay) {
-      const est = tokenEstimates(toUsd(spent, cur))['Mixed chat (3 in : 1 out)']
-      console.log(`  ${day.padEnd(14)}${fmtMoney(spent, cur).padEnd(12)}≈ ${fmtTokens(est)} tokens (mixed chat)`)
+      console.log(`  ${day.padEnd(14)}${fmtMoney(spent, cur)}`)
     }
   }
 }
@@ -151,8 +119,7 @@ async function main() {
       const diff = last.total - total
       const since = new Date(last.at).toLocaleString()
       if (diff > 0) {
-        const est = tokenEstimates(toUsd(diff, cur))['Mixed chat (3 in : 1 out)']
-        console.log(`  Spent since ${since}: ${fmtMoney(diff, cur)} (≈ ${fmtTokens(est)} tokens, mixed chat)`)
+        console.log(`  Spent since ${since}: ${fmtMoney(diff, cur)}`)
       } else if (diff < 0) {
         console.log(`  Balance up ${fmtMoney(-diff, cur)} since ${since} (top-up)`)
       } else {
@@ -160,18 +127,24 @@ async function main() {
       }
     }
 
-    console.log('  Estimated tokens remaining:')
-    for (const [label, n] of Object.entries(tokenEstimates(toUsd(total, cur)))) {
-      console.log(`    ${label.padEnd(28)}${fmtTokens(n)}`)
+    // Days left at your recent pace (last 7 days of recorded snapshots).
+    const rows = history.filter((h) => h.currency === cur)
+    if (rows.length) {
+      const weekAgo = Date.now() - 7 * 86400e3
+      let spentWeek = 0
+      const all = [...rows, { at: new Date().toISOString(), total }]
+      for (let k = 1; k < all.length; k++) {
+        const d = all[k - 1].total - all[k].total
+        if (d > 0 && Date.parse(all[k].at) >= weekAgo) spentWeek += d
+      }
+      const span = Math.min(7, Math.max(1, (Date.now() - Date.parse(rows[0].at)) / 86400e3))
+      const perDay = spentWeek / span
+      if (perDay > 0) console.log(`  Lasts about ${Math.round(total / perDay)} days at ${fmtMoney(perDay, cur)}/day`)
     }
 
     snapshots.push({ at: new Date().toISOString(), currency: cur, total, granted, toppedUp })
   }
 
-  console.log(
-    `\nPrices used (USD / 1M tokens): input hit $${PRICE.inputHit}, miss $${PRICE.inputMiss}, output $${PRICE.output}` +
-      ' — override with DS_PRICE_* in .env if DeepSeek changes them.',
-  )
 
   if (!args.has('--no-save') && snapshots.length) {
     writeFileSync(HISTORY_FILE, JSON.stringify([...history, ...snapshots], null, 2))

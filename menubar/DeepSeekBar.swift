@@ -6,10 +6,11 @@ import AppKit
 import SwiftUI
 import Charts
 import ServiceManagement
+import UserNotifications
 
 // MARK: - Config
 
-let projectDir = URL(fileURLWithPath: CommandLine.arguments.count > 1
+let projectDir = URL(fileURLWithPath: CommandLine.arguments.count > 1 && !CommandLine.arguments[1].hasPrefix("--")
     ? CommandLine.arguments[1]
     : (Bundle.main.object(forInfoDictionaryKey: "DSProjectDir") as? String ?? NSHomeDirectory()))
 let envURL = projectDir.appendingPathComponent(".env")
@@ -30,16 +31,9 @@ func loadEnv() -> [String: String] {
     return env
 }
 
-struct Prices {
-    var inputHit = 0.028, inputMiss = 0.28, output = 0.42, cnyPerUsd = 7.1
-    init(_ env: [String: String]) {
-        if let v = env["DS_PRICE_INPUT_HIT"].flatMap(Double.init) { inputHit = v }
-        if let v = env["DS_PRICE_INPUT_MISS"].flatMap(Double.init) { inputMiss = v }
-        if let v = env["DS_PRICE_OUTPUT"].flatMap(Double.init) { output = v }
-        if let v = env["DS_CNY_PER_USD"].flatMap(Double.init) { cnyPerUsd = v }
-    }
-    var blended: Double { (3 * inputMiss + output) / 4 }
-    func usd(_ amount: Double, _ cur: String) -> Double { cur == "CNY" ? amount / cnyPerUsd : amount }
+
+func cnyPerUsd(_ env: [String: String]) -> Double {
+    env["DS_CNY_PER_USD"].flatMap(Double.init).flatMap { $0 > 0 ? $0 : nil } ?? 7.1
 }
 
 // MARK: - Data
@@ -106,14 +100,6 @@ func reference(_ h: [Snapshot], currency: String, budget: Double?) -> Double {
 func money(_ v: Double, _ cur: String) -> String {
     (cur == "CNY" ? "¥" : "$") + String(format: v < 10 ? "%.3f" : "%.2f", v)
 }
-func tokens(_ n: Double) -> String {
-    switch n {
-    case 1e9...: return String(format: "%.2fB", n / 1e9)
-    case 1e6...: return String(format: "%.2fM", n / 1e6)
-    case 1e3...: return String(format: "%.1fK", n / 1e3)
-    default: return String(Int(n))
-    }
-}
 
 /// Daily spend for the last `days` days (oldest first), top-ups ignored.
 func dailySpend(_ h: [Snapshot], currency: String, days: Int, now: Date) -> [(day: Date, amount: Double)] {
@@ -139,8 +125,7 @@ struct Usage {
     var reference = 0.0, pct = 0.0, isBudget = false
     var today = 0.0, week = 0.0, lastSpend: Double?
     var daily: [(day: Date, amount: Double)] = []
-    var tokensMixed = 0.0, tokensOutput = 0.0, tokensMiss = 0.0, tokensHit = 0.0
-    var requestsLeft = 0.0, requestShape = ""
+    var perDay: Double?
     var daysLeft: Double?
     var cnyPerUsd = 7.1
 }
@@ -154,10 +139,12 @@ final class Store: ObservableObject {
     @Published var updated: Date?
     @Published var refreshing = false
     var onChange: (() -> Void)?
+    var alertPercent = 15.0
 
     func refresh() {
         refreshing = true
         let env = loadEnv()
+        alertPercent = env["DS_ALERT_PERCENT"].flatMap(Double.init) ?? 15
         guard let key = env["DEEPSEEK_API_KEY"], !key.isEmpty, !key.contains("your-key") else {
             finish(.error("No API key", "Add DEEPSEEK_API_KEY to \(envURL.path)"))
             return
@@ -183,11 +170,35 @@ final class Store: ObservableObject {
         state = s
         updated = Date()
         refreshing = false
+        if case let .loaded(u) = s { checkAlert(u) }
         onChange?()
     }
 
+    /// One notification when the balance drops below DS_ALERT_PERCENT (default 15%)
+    /// or the API gets paused. Re-arms once you're back above the line (e.g. after a top-up).
+    private func checkAlert(_ u: Usage) {
+        let defaults = UserDefaults.standard
+        let low = !u.available || (u.reference > 0 && u.pct < alertPercent)
+        guard low else { defaults.set(false, forKey: "alerted"); return }
+        guard !defaults.bool(forKey: "alerted") else { return }
+        defaults.set(true, forKey: "alerted")
+
+        let title = u.available ? "DeepSeek balance low" : "DeepSeek API paused"
+        let body = u.available
+            ? String(format: "%.0f%% left (%@). Top up to keep using the API.", u.pct, money(u.total, u.currency))
+            : "Your balance has run out. Top up to resume."
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { ok, _ in
+            guard ok else { return }
+            let content = UNMutableNotificationContent()
+            content.title = title
+            content.body = body
+            content.sound = .default
+            UNUserNotificationCenter.current().add(
+                UNNotificationRequest(identifier: "low-balance", content: content, trigger: nil))
+        }
+    }
+
     private func compute(_ r: BalanceResponse, _ env: [String: String]) -> Usage {
-        let p = Prices(env)
         let now = Date()
         var history = loadHistory()
         // DeepSeek can return several balances (e.g. CNY and an empty USD one) in no fixed
@@ -205,7 +216,7 @@ final class Store: ObservableObject {
         u.total = Double(b.total_balance) ?? 0
         u.granted = Double(b.granted_balance) ?? 0
         u.toppedUp = Double(b.topped_up_balance) ?? 0
-        u.cnyPerUsd = p.cnyPerUsd
+        u.cnyPerUsd = cnyPerUsd(env)
 
         let prev = history.last(where: { $0.currency == u.currency })
         if prev?.total != u.total {
@@ -227,24 +238,11 @@ final class Store: ObservableObject {
         u.week = spent(history, currency: u.currency, since: now.addingTimeInterval(-7 * 86400))
         u.daily = dailySpend(history, currency: u.currency, days: 7, now: now)
 
-        let usd = p.usd(u.total, u.currency)
-        u.tokensMixed = usd / p.blended * 1e6
-        u.tokensOutput = usd / p.output * 1e6
-        u.tokensMiss = usd / p.inputMiss * 1e6
-        u.tokensHit = usd / p.inputHit * 1e6
-
-        // A "typical request" — tune with DS_AVG_INPUT / DS_AVG_OUTPUT in .env.
-        let avgIn = env["DS_AVG_INPUT"].flatMap(Double.init) ?? 2000
-        let avgOut = env["DS_AVG_OUTPUT"].flatMap(Double.init) ?? 500
-        let reqCost = (avgIn * p.inputMiss + avgOut * p.output) / 1e6
-        u.requestsLeft = reqCost > 0 ? usd / reqCost : 0
-        u.requestShape = "\(tokens(avgIn)) in + \(tokens(avgOut)) out"
-
         // Days left at your recent pace (average over the days we have data for, up to 7).
         if let first = rows.first.flatMap({ parseDate($0.at) }) {
             let span = min(7, max(1, now.timeIntervalSince(first) / 86400))
             let perDay = u.week / span
-            if perDay > 0 { u.daysLeft = u.total / perDay }
+            if perDay > 0 { u.perDay = perDay; u.daysLeft = u.total / perDay }
         }
 
         return u
@@ -300,23 +298,6 @@ struct Bar: View {
             }
         }
         .frame(height: height)
-    }
-}
-
-struct TokenRow: View {
-    var label: String
-    var value: Double
-    var maxValue: Double
-    var color: Color
-    var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack {
-                Text(label).font(.caption)
-                Spacer()
-                Text(tokens(value)).font(.caption.monospacedDigit().weight(.semibold))
-            }
-            Bar(fraction: maxValue > 0 ? log10(max(1, value)) / log10(max(10, maxValue)) : 0, color: color, height: 4)
-        }
     }
 }
 
@@ -391,6 +372,7 @@ struct PopoverView: View {
 
     var updatedText: String {
         guard let d = store.updated else { return "Updating…" }
+        if Date().timeIntervalSince(d) < 60 { return "Updated just now" }
         return "Updated " + RelativeDateTimeFormatter().localizedString(for: d, relativeTo: Date())
     }
 
@@ -417,23 +399,20 @@ struct PopoverView: View {
             .font(.caption2).foregroundStyle(.secondary)
         }
 
-        // How much can I still use
-        Card(title: "You can still use (est.)", icon: "sparkles") {
-            HStack(spacing: 14) {
-                stat(String(format: "≈ %@", tokens(u.requestsLeft)), "requests", u.requestShape)
-                Divider().frame(height: 30)
-                stat(u.daysLeft.map { $0 >= 365 ? "1y+" : String(format: "%.0f", $0) } ?? "—",
-                     "days", "at your 7-day pace")
-            }
-            Grid(horizontalSpacing: 6, verticalSpacing: 6) {
-                GridRow {
-                    tile("Chat mix 3:1", u.tokensMixed, accent)
-                    tile("Output only", u.tokensOutput, .purple)
+        // How long it lasts — measured from your own spending, no price guesses
+        Card(title: "How long it lasts", icon: "hourglass") {
+            if let days = u.daysLeft, let perDay = u.perDay {
+                HStack(spacing: 6) {
+                    tileText(days >= 365 ? "1 year+" : String(format: "≈ %.0f days", days), "at your 7-day pace", accent)
+                    tileText(fmt(perDay, u), "average per day", .purple)
                 }
-                GridRow {
-                    tile("Input · miss", u.tokensMiss, .teal)
-                    tile("Input · cache hit", u.tokensHit, .green)
+                if days < 365 {
+                    Text("Runs out around \(Date().addingTimeInterval(days * 86400).formatted(date: .abbreviated, time: .omitted))")
+                        .font(.caption2).foregroundStyle(.secondary)
                 }
+            } else {
+                Text("Fills in once you've used the API for a day or two.")
+                    .font(.caption2).foregroundStyle(.secondary)
             }
         }
 
@@ -464,10 +443,6 @@ struct PopoverView: View {
         }
     }
 
-    func tile(_ label: String, _ value: Double, _ color: Color) -> some View {
-        tileText(tokens(value), label, color)
-    }
-
     func tileText(_ value: String, _ label: String, _ color: Color) -> some View {
         HStack(spacing: 6) {
             RoundedRectangle(cornerRadius: 2).fill(color.gradient).frame(width: 3, height: 26)
@@ -480,16 +455,6 @@ struct PopoverView: View {
         .padding(.vertical, 5).padding(.horizontal, 7)
         .frame(maxWidth: .infinity)
         .background(RoundedRectangle(cornerRadius: 7).fill(color.opacity(0.08)))
-    }
-
-    func stat(_ value: String, _ unit: String, _ caption: String) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
-            HStack(alignment: .firstTextBaseline, spacing: 3) {
-                Text(value).font(.title3.weight(.bold).monospacedDigit())
-                Text(unit).font(.caption).foregroundStyle(.secondary)
-            }
-            Text(caption).font(.caption2).foregroundStyle(.secondary)
-        }
     }
 
     func pill(_ label: String, _ value: String) -> some View {
@@ -505,12 +470,12 @@ struct PopoverView: View {
             Button("Usage") { NSWorkspace.shared.open(URL(string: "https://platform.deepseek.com/usage")!) }
             Button("Top up") { NSWorkspace.shared.open(URL(string: "https://platform.deepseek.com/top_up")!) }
             Spacer()
-            Toggle("Open at login", isOn: $loginOn)
+            Toggle("Open at login", isOn: Binding(get: { loginOn }, set: { on in
+                do { on ? try SMAppService.mainApp.register() : try SMAppService.mainApp.unregister() }
+                catch { NSSound.beep() }
+                loginOn = SMAppService.mainApp.status == .enabled
+            }))
                 .toggleStyle(.switch).controlSize(.mini)
-                .onChange(of: loginOn) { on in
-                    do { on ? try SMAppService.mainApp.register() : try SMAppService.mainApp.unregister() }
-                    catch { NSSound.beep() }
-                }
                 .help("Open at login")
             Button { NSApp.terminate(nil) } label: { Image(systemName: "power") }
                 .help("Quit")
@@ -619,6 +584,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.activate(ignoringOtherApps: true)
         }
     }
+}
+
+// MARK: - Demo screenshot (for the README; uses made-up numbers, no API call)
+//   DeepSeekBar.app/Contents/MacOS/DeepSeekBar --render-demo out.png [light|dark]
+
+@MainActor func renderDemo(to path: String, dark: Bool) {
+    let now = Date()
+    var u = Usage()
+    u.currency = "CNY"
+    u.total = 42.50; u.toppedUp = 42.50; u.reference = 60
+    u.pct = u.total / u.reference * 100
+    u.today = 0.48; u.week = 4.31; u.lastSpend = 0.12
+    let amounts = [0.55, 0.92, 0.31, 0.74, 0.66, 0.65, 0.48]
+    u.daily = amounts.enumerated().map { (i, a) in
+        (day: Calendar.current.date(byAdding: .day, value: i - 6, to: Calendar.current.startOfDay(for: now))!, amount: a)
+    }
+    u.perDay = u.week / 7; u.daysLeft = u.total / u.perDay!
+
+    let store = Store()
+    store.state = .loaded(u)
+    store.updated = now
+    let view = PopoverView(store: store).background(Color(nsColor: .windowBackgroundColor))
+    let host = NSHostingView(rootView: view)
+    host.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+    host.frame.size = host.fittingSize
+    let window = NSWindow(contentRect: host.frame, styleMask: .borderless, backing: .buffered, defer: false)
+    window.contentView = host
+    host.layoutSubtreeIfNeeded()
+    RunLoop.main.run(until: Date().addingTimeInterval(0.5))  // let Charts finish laying out
+
+    let scale: CGFloat = 2
+    let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(host.bounds.width * scale),
+                               pixelsHigh: Int(host.bounds.height * scale), bitsPerSample: 8,
+                               samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                               colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+    rep.size = host.bounds.size
+    host.cacheDisplay(in: host.bounds, to: rep)
+    try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+}
+
+if let i = CommandLine.arguments.firstIndex(of: "--render-demo"), i + 1 < CommandLine.arguments.count {
+    _ = NSApplication.shared
+    let dark = CommandLine.arguments.dropFirst(i + 2).first == "dark"
+    MainActor.assumeIsolated { renderDemo(to: CommandLine.arguments[i + 1], dark: dark) }
+    exit(0)
 }
 
 let app = NSApplication.shared

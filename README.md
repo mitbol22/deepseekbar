@@ -2,8 +2,17 @@
 
 A small macOS menu bar app that shows your **DeepSeek API balance** at a glance.
 
-- 🐋 DeepSeek logo, a mini gauge and **% of balance left** in the menu bar (turns red below 15%)
-- Click it for a panel with your balance, **spending today / last 7 days** with a chart, and an estimate of how many **requests, tokens and days** you have left
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/screenshot-dark.png">
+    <img src="docs/screenshot-light.png" alt="DeepSeekBar panel showing 71% balance left, about 69 days remaining and a 7-day spending chart" width="320">
+  </picture>
+  <br><sub>Demo numbers</sub>
+</p>
+
+- 🐋 DeepSeek logo, a mini gauge and **% of balance left** in the menu bar (turns red when low)
+- Click it for your balance, **how long it lasts** at your current pace, and **spending today / last 7 days** with a chart
+- A macOS **notification when your balance runs low**
 - Switch amounts between **¥ CNY and $ USD**
 - Optional **Open at login**
 - Also includes `balance.mjs`, a command-line version
@@ -37,13 +46,13 @@ DeepSeek's API only exposes your **balance** (`GET /user/balance`), not per-requ
 
 1. Checks your balance every 15 minutes and whenever you open the panel.
 2. Saves a snapshot to `history.json` whenever the balance changes.
-3. Works out **spending** from the drops between snapshots (top-ups are ignored).
+3. Works out **spending** from the drops between snapshots (top-ups are ignored), and **how long it lasts** from your average daily spend over the last 7 days.
 
-That means spending history starts from the first time you run it.
+Everything shown is measured from your own balance — there are no price-based guesses. Spending history starts from the first time you run it, so "how long it lasts" fills in after a day or two of use. For per-request and per-token detail, see [platform.deepseek.com/usage](https://platform.deepseek.com/usage).
 
 **What 100% means:** DeepSeek has no quota, only a prepaid balance. By default 100% is your balance right after your latest top-up, and each top-up resets it. Set `DS_BUDGET` to measure against a fixed amount instead.
 
-**Estimates:** "requests" and "tokens" left are worked out from list prices and a typical request size, so treat them as rough. If you rely heavily on cached input or send very large requests, your real numbers will differ. For exact figures, see [platform.deepseek.com/usage](https://platform.deepseek.com/usage).
+**Low-balance alert:** you get one notification when the balance drops below `DS_ALERT_PERCENT` (default 15%) or the API is paused. It re-arms after you top up.
 
 If your account has balances in both CNY and USD, the app shows the one with money in it.
 
@@ -53,13 +62,10 @@ If your account has balances in both CNY and USD, the app shows the one with mon
 |---|---|---|
 | `DEEPSEEK_API_KEY` | — | Your API key (required) |
 | `DS_BUDGET` | balance after last top-up | Fixed amount that counts as 100% |
-| `DS_PRICE_INPUT_HIT` | `0.028` | Price per 1M cached input tokens (USD) |
-| `DS_PRICE_INPUT_MISS` | `0.28` | Price per 1M uncached input tokens (USD) |
-| `DS_PRICE_OUTPUT` | `0.42` | Price per 1M output tokens (USD) |
-| `DS_CNY_PER_USD` | `7.1` | Exchange rate for the ¥ / $ switch and estimates |
-| `DS_AVG_INPUT` / `DS_AVG_OUTPUT` | `2000` / `500` | Size of a "typical request" |
+| `DS_ALERT_PERCENT` | `15` | Notify when the balance drops below this % |
+| `DS_CNY_PER_USD` | `7.1` | Exchange rate for the ¥ / $ switch |
 
-DeepSeek changes its prices from time to time — check the [pricing page](https://api-docs.deepseek.com/quick_start/pricing) and update the `DS_PRICE_*` values if needed. Click refresh in the panel after editing `.env`.
+Click refresh in the panel after editing `.env`.
 
 ## Command-line version
 
@@ -75,6 +81,16 @@ It uses the same `.env` and `history.json` as the app.
 
 - `.env` (your key) and `history.json` (your balance history) are git-ignored and never leave your Mac, except the key being sent to DeepSeek's API.
 - The app has no analytics and talks to no server other than `api.deepseek.com`.
+
+## Development
+
+The README screenshots are rendered by the app itself from made-up numbers:
+
+```bash
+B=~/Applications/DeepSeekBar.app/Contents/MacOS/DeepSeekBar
+$B --render-demo docs/screenshot-light.png light
+$B --render-demo docs/screenshot-dark.png dark
+```
 
 ## Uninstall
 
